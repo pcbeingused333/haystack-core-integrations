@@ -41,6 +41,28 @@ class TestConvertFiltersToQdrantUnit:
         with pytest.raises(FilterError, match=match):
             convert_filters_to_qdrant(filter_input)
 
+    @pytest.mark.parametrize("value", [4, 4.0, 4.5, -(2**53), 2**53])
+    def test_numeric_equality_is_a_closed_range(self, value):
+        """A range matches int and float payloads alike, which `MatchValue` doesn't."""
+        condition = convert_filters_to_qdrant({"operator": "==", "field": "meta.x", "value": value}).must[0]
+        assert condition.range == models.Range(gte=value, lte=value)
+        assert condition.match is None
+
+    @pytest.mark.parametrize("value", [2**53 + 1, -(2**60)])
+    def test_numeric_equality_keeps_large_ints_exact(self, value):
+        """
+        The Qdrant server compares ranges as 64-bit floats, so a range on 2**60 also matches 2**60 + 1.
+
+        Local mode compares in Python and doesn't show this, so the condition itself is checked here.
+        """
+        condition = convert_filters_to_qdrant({"operator": "==", "field": "meta.x", "value": value}).must[0]
+        assert condition.match == models.MatchValue(value=value)
+
+    @pytest.mark.parametrize("value", [True, "4"])
+    def test_non_numeric_equality_keeps_match_value(self, value):
+        condition = convert_filters_to_qdrant({"operator": "==", "field": "meta.x", "value": value}).must[0]
+        assert condition.match == models.MatchValue(value=value)
+
     @pytest.mark.parametrize("operator", ["<", "<=", ">", ">="])
     def test_range_operators_reject_non_numeric_non_datetime(self, operator):
         with pytest.raises(FilterError, match="not an int or float or datetime string"):
@@ -137,6 +159,27 @@ class TestQdrantFilters(FilterDocumentsTest):
         )
 
         assert sorted(doc.meta["name"] for doc in result) == ["New York City", "newsletter"]
+
+    @pytest.mark.parametrize(
+        ("operator", "value", "expected"),
+        [
+            ("==", 4, [4, 4.0]),
+            ("==", 4.0, [4, 4.0]),
+            ("==", 4.5, [4.5]),
+            ("!=", 4.5, [3, 4, 4.0]),
+            ("in", [3.0, 4.5], [3, 4.5]),
+            ("not in", [4], [3, 4.5]),
+        ],
+    )
+    def test_numeric_equality_matches_ints_and_floats_alike(self, document_store, operator, value, expected):
+        """Metadata parsed from JSON mixes ints and floats, and a float filter value must not crash."""
+        document_store.write_documents(
+            [Document(content=str(rating), meta={"rating": rating}) for rating in [3, 4, 4.0, 4.5]]
+        )
+
+        result = document_store.filter_documents(filters={"field": "meta.rating", "operator": operator, "value": value})
+
+        assert sorted(doc.meta["rating"] for doc in result) == expected
 
     def test_filter_documents_with_qdrant_filters(self, document_store, filterable_docs):
         document_store.write_documents(filterable_docs)

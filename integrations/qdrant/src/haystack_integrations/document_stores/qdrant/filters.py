@@ -134,7 +134,18 @@ def _build_comparison_condition(operator: str, key: str, value: Any) -> models.C
     return builder(key, value)
 
 
+# Qdrant compares ranges as 64-bit floats, which hold every int up to this magnitude exactly.
+_MAX_EXACT_FLOAT_INT = 2**53
+
+
 def _build_eq_condition(key: str, value: models.ValueVariants) -> models.Condition:
+    if isinstance(value, float) or (
+        isinstance(value, int) and not isinstance(value, bool) and abs(value) <= _MAX_EXACT_FLOAT_INT
+    ):
+        # `MatchValue` rejects floats and matches an int only against int payloads, so `1` would miss a stored `1.0`.
+        # A closed range compares numerically and matches both. Past 2**53 a range can't tell neighbouring ints
+        # apart, so a larger int keeps the exact `MatchValue`.
+        return models.FieldCondition(key=key, range=models.Range(gte=value, lte=value))
     return models.FieldCondition(key=key, match=models.MatchValue(value=value))
 
 
