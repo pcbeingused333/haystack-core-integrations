@@ -29,13 +29,20 @@ class TestComparisons:
     def test_equal_picks_the_field_matching_the_value_type(self):
         """The type code comes from the filter value, so "100" and 100 address different fields."""
         assert normalize_filters({"field": "meta.page", "operator": "==", "value": "100"}) == 'meta_s_page:"100"'
-        assert normalize_filters({"field": "meta.page", "operator": "==", "value": 100}) == "meta_l_page:100"
+        assert normalize_filters({"field": "meta.page", "operator": "==", "value": 100}) == (
+            "(meta_l_page:100 OR meta_d_page:100.0)"
+        )
         assert normalize_filters({"field": "meta.page", "operator": "==", "value": 1.5}) == "meta_d_page:1.5"
         assert normalize_filters({"field": "meta.page", "operator": "==", "value": True}) == "meta_b_page:true"
 
     @pytest.mark.parametrize(
         ("value", "expected"),
-        [(10, "meta_l_n:10"), (-10, "meta_l_n:\\-10"), (2.5, "meta_d_n:2.5"), (-2.5, "meta_d_n:\\-2.5")],
+        [
+            (10, "(meta_l_n:10 OR meta_d_n:10.0)"),
+            (-10, "(meta_l_n:\\-10 OR meta_d_n:\\-10.0)"),
+            (2.5, "meta_d_n:2.5"),
+            (-2.5, "meta_d_n:\\-2.5"),
+        ],
     )
     def test_negative_numbers_are_escaped(self, value, expected):
         """
@@ -47,11 +54,11 @@ class TestComparisons:
 
     def test_negative_numbers_are_escaped_in_groups(self):
         clause = normalize_filters({"field": "meta.n", "operator": "in", "value": [-10, 100]})
-        assert clause == "(meta_l_n:(\\-10 OR 100))"
+        assert clause == "(meta_l_n:(\\-10 OR 100) OR meta_d_n:(\\-10.0 OR 100.0))"
 
     def test_negative_numbers_are_escaped_in_ranges(self):
         clause = normalize_filters({"field": "meta.n", "operator": ">=", "value": -10})
-        assert clause == "meta_l_n:[\\-10 TO *]"
+        assert clause == "(meta_l_n:[\\-10 TO *] OR meta_d_n:[\\-10.0 TO *])"
 
     def test_meta_prefix_is_optional(self):
         with_prefix = normalize_filters({"field": "meta.page", "operator": "==", "value": "x"})
@@ -76,16 +83,17 @@ class TestComparisons:
     def test_not_equal_also_matches_documents_missing_the_field(self):
         """`None != 100` is true in Python, so a Solr negation is the right translation."""
         assert (
-            normalize_filters({"field": "meta.number", "operator": "!=", "value": 100}) == "(*:* -(meta_l_number:100))"
+            normalize_filters({"field": "meta.number", "operator": "!=", "value": 100})
+            == "(*:* -((meta_l_number:100 OR meta_d_number:100.0)))"
         )
 
     @pytest.mark.parametrize(
         ("operator", "expected"),
         [
-            (">", "meta_l_number:{100 TO *}"),
-            (">=", "meta_l_number:[100 TO *]"),
-            ("<", "meta_l_number:[* TO 100}"),
-            ("<=", "meta_l_number:[* TO 100]"),
+            (">", "(meta_l_number:{100 TO *} OR meta_d_number:{100.0 TO *})"),
+            (">=", "(meta_l_number:[100 TO *] OR meta_d_number:[100.0 TO *])"),
+            ("<", "(meta_l_number:[* TO 100} OR meta_d_number:[* TO 100.0})"),
+            ("<=", "(meta_l_number:[* TO 100] OR meta_d_number:[* TO 100.0])"),
         ],
     )
     def test_ranges(self, operator, expected):
@@ -119,9 +127,49 @@ class TestComparisons:
         assert "meta_l_mixed:(1 OR 2)" in clause
         assert 'meta_s_mixed:("a")' in clause
 
+    def test_numbers_match_ints_and_floats_alike(self):
+        """
+        An int and a float are stored in different fields, but `4 == 4.0` in Haystack's filter semantics.
+
+        Metadata parsed from JSON mixes them (`4` is an int, `4.5` a float), so a numeric filter has to
+        cover both fields or it silently drops the documents of the other type.
+        """
+        assert normalize_filters({"field": "meta.r", "operator": "==", "value": 4.0}) == "(meta_l_r:4 OR meta_d_r:4.0)"
+        assert normalize_filters({"field": "meta.r", "operator": "in", "value": [4, 4.5]}) == (
+            "(meta_l_r:(4) OR meta_d_r:(4.0 OR 4.5))"
+        )
+
+    @pytest.mark.parametrize(
+        ("operator", "expected"),
+        [
+            (">", "(meta_l_r:[5 TO *] OR meta_d_r:{4.5 TO *})"),
+            (">=", "(meta_l_r:[5 TO *] OR meta_d_r:[4.5 TO *])"),
+            ("<", "(meta_l_r:[* TO 4] OR meta_d_r:[* TO 4.5})"),
+            ("<=", "(meta_l_r:[* TO 4] OR meta_d_r:[* TO 4.5])"),
+        ],
+    )
+    def test_fractional_range_bounds_are_rounded_on_the_int_field(self, operator, expected):
+        """Solr rejects a fractional bound on an integer field, so it is rounded to select the same ints."""
+        assert normalize_filters({"field": "meta.r", "operator": operator, "value": 4.5}) == expected
+
+    @pytest.mark.parametrize(
+        ("operator", "value", "expected"),
+        [
+            ("==", 1e20, "meta_d_r:1e+20"),
+            ("in", [1e20, 3], "(meta_d_r:(1e+20 OR 3.0) OR meta_l_r:(3))"),
+            (">=", 1e20, "meta_d_r:[1e+20 TO *]"),
+            ("<", 1e20, "(meta_l_r:[* TO *] OR meta_d_r:[* TO 1e+20})"),
+            (">", -1e20, "(meta_l_r:[* TO *] OR meta_d_r:{\\-1e+20 TO *})"),
+            ("<=", -1e20, "meta_d_r:[* TO \\-1e+20]"),
+        ],
+    )
+    def test_numbers_outside_the_long_range_skip_or_span_the_int_field(self, operator, value, expected):
+        """Solr rejects a number outside the long range on an integer field, so it's never put there."""
+        assert normalize_filters({"field": "meta.r", "operator": operator, "value": value}) == expected
+
     def test_not_in_is_a_negated_in(self):
         clause = normalize_filters({"field": "meta.number", "operator": "not in", "value": [1, 2]})
-        assert clause == "(*:* -((meta_l_number:(1 OR 2))))"
+        assert clause == "(*:* -((meta_l_number:(1 OR 2) OR meta_d_number:(1.0 OR 2.0))))"
 
     @pytest.mark.parametrize("operator", ["in", "not in"])
     def test_non_list_values_are_rejected(self, operator):
@@ -169,7 +217,7 @@ class TestLogicalConditions:
                 ],
             }
         )
-        assert clause == '(meta_s_page:"100" AND meta_l_number:{1 TO *})'
+        assert clause == '(meta_s_page:"100" AND (meta_l_number:{1 TO *} OR meta_d_number:{1.0 TO *}))'
 
     def test_or(self):
         clause = normalize_filters(
@@ -205,7 +253,10 @@ class TestLogicalConditions:
                 ],
             }
         )
-        assert clause == '(meta_s_chapter:"intro" AND (meta_l_number:2 OR meta_l_number:\\-10))'
+        assert clause == (
+            '(meta_s_chapter:"intro" AND ((meta_l_number:2 OR meta_d_number:2.0) OR '
+            "(meta_l_number:\\-10 OR meta_d_number:\\-10.0)))"
+        )
 
     def test_unknown_logical_operator(self):
         with pytest.raises(FilterError, match="Unknown logical operator"):

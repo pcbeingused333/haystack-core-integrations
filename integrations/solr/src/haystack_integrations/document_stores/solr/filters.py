@@ -4,6 +4,7 @@
 
 """Translation of Haystack filters into Solr filter query (`fq`) clauses."""
 
+import math
 from datetime import datetime
 from typing import Any
 
@@ -72,6 +73,39 @@ def _resolve_field(field: str, value: Any) -> str:
     return meta_field_name(normalized, type_code_for_value(value))
 
 
+def _numeric_fields(field: str, value: Any) -> tuple[str, str] | None:
+    """
+    Return the integer and float Solr fields of a metadata key, if `value` is compared as a number.
+
+    An int and a float are stored under different type codes, so a numeric comparison has to look at
+    both fields: `{"rating": 4}` and `{"rating": 4.5}` are both matched by `rating >= 4`.
+
+    :param field: the Haystack field name, with or without a `meta.` prefix.
+    :param value: the value being compared.
+    :returns: the `(integer field, float field)` pair, or `None` if `value` is not a finite int or float or
+        `field` is not a metadata field.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return None
+    normalized = _normalize_field_name(field)
+    if normalized in _SPECIAL_FIELDS:
+        return None
+    return meta_field_name(normalized, "l"), meta_field_name(normalized, "d")
+
+
+# The range of Solr's `plong` field type, which stores integer metadata.
+_LONG_MIN = -(2**63)
+_LONG_MAX = 2**63 - 1
+
+
+def _as_integer(value: float) -> int | None:
+    """Return `value` as an int if it has no fractional part and fits in a Solr long, else `None`."""
+    integer = value if isinstance(value, int) else int(value) if value.is_integer() else None
+    if integer is None or not _LONG_MIN <= integer <= _LONG_MAX:
+        return None
+    return integer
+
+
 def _negate(clause: str) -> str:
     """
     Wrap `clause` in a negation that is valid in every position.
@@ -107,6 +141,16 @@ def _equality_clause(field: str, value: Any) -> str:
             return _negate(_existence_clause(field))
         solr_field = _resolve_field(field, value)
         return "(" + " AND ".join(f"{solr_field}:{_format_value(element)}" for element in value) + ")"
+    numeric_fields = _numeric_fields(field, value)
+    if numeric_fields is not None:
+        integer_field, float_field = numeric_fields
+        float_clause = f"{float_field}:{_format_value(float(value))}"
+        integer = _as_integer(value)
+        if integer is None:
+            # A float with a fractional part, or a number outside the long range, can't equal any stored int,
+            # and Solr rejects it on an integer field.
+            return float_clause
+        return f"({integer_field}:{_format_value(integer)} OR {float_clause})"
     return f"{_resolve_field(field, value)}:{_format_value(value)}"
 
 
@@ -129,6 +173,31 @@ def _range_clause(field: str, operator: str, value: Any) -> str:
         msg = f"Filter value can't be of type bool using operator {operator!r}"
         raise FilterError(msg)
 
+    numeric_fields = _numeric_fields(field, value)
+    if numeric_fields is not None:
+        integer_field, float_field = numeric_fields
+        float_clause = f"{float_field}:{_RANGE_TEMPLATES[operator].format(value=_format_value(float(value)))}"
+        integer_operator, integer = operator, value
+        if isinstance(value, float) and not value.is_integer():
+            # Solr rejects a fractional bound on an integer field, so round it to the nearest int that
+            # selects the same ints: `> 4.5` and `>= 4.5` mean `>= 5`, `< 4.5` and `<= 4.5` mean `<= 4`.
+            if operator in (">", ">="):
+                integer_operator, integer = ">=", math.ceil(value)
+            else:
+                integer_operator, integer = "<=", math.floor(value)
+        integer = int(integer)
+        lower_bound = integer_operator in (">", ">=")
+        if integer > _LONG_MAX if lower_bound else integer < _LONG_MIN:
+            # Solr rejects a bound outside the long range, and no stored int is past it.
+            return float_clause
+        if integer < _LONG_MIN if lower_bound else integer > _LONG_MAX:
+            # Every stored int is within the bound.
+            integer_clause = f"{integer_field}:[* TO *]"
+        else:
+            template = _RANGE_TEMPLATES[integer_operator]
+            integer_clause = f"{integer_field}:{template.format(value=_format_value(integer))}"
+        return f"({integer_clause} OR {float_clause})"
+
     solr_field = _resolve_field(field, value)
     return f"{solr_field}:{_RANGE_TEMPLATES[operator].format(value=_format_value(value))}"
 
@@ -145,7 +214,15 @@ def _in_clause(field: str, operator: str, value: Any) -> str:
     for element in value:
         if element is None:
             continue
-        grouped.setdefault(_resolve_field(field, element), []).append(element)
+        numeric_fields = _numeric_fields(field, element)
+        if numeric_fields is None:
+            grouped.setdefault(_resolve_field(field, element), []).append(element)
+            continue
+        integer_field, float_field = numeric_fields
+        integer = _as_integer(element)
+        if integer is not None:
+            grouped.setdefault(integer_field, []).append(integer)
+        grouped.setdefault(float_field, []).append(float(element))
     if not grouped:
         # A list of nothing but nulls can only match documents that have no value for the field.
         return _negate(_existence_clause(field))

@@ -519,7 +519,7 @@ class TestPureHelpers:
         params = SolrDocumentStore._unique_values_params("meta_s_a", _FILTERS, "needle")
         assert params["facet.contains"] == "needle"
         assert params["facet.contains.ignoreCase"] is True
-        assert params["fq"] == "meta_l_page:1"
+        assert params["fq"] == "(meta_l_page:1 OR meta_d_page:1.0)"
         assert "facet.contains" not in SolrDocumentStore._unique_values_params("meta_s_a", None, None)
 
     def test_no_facets_means_every_field_counts_zero(self):
@@ -869,6 +869,41 @@ class TestSolrSpecificBehaviour:
         """Solr's schemaless chain strips blank values; the store must have disabled it."""
         document_store.write_documents([Document(id="1", content="")], DuplicatePolicy.OVERWRITE)
         assert document_store.filter_documents()[0].content == ""
+
+    @pytest.mark.parametrize(
+        ("operator", "value", "expected_ids"),
+        [
+            (">=", 4, ["4", "4.5", "5.0"]),
+            (">", 4.2, ["4.5", "5.0"]),
+            ("<", 4.2, ["3", "4"]),
+            ("==", 5, ["5.0"]),
+            ("!=", 4.0, ["3", "4.5", "5.0"]),
+            ("in", [3.0, 4.5], ["3", "4.5"]),
+            ("not in", [4, 5], ["3", "4.5"]),
+        ],
+    )
+    def test_numeric_filters_match_ints_and_floats_alike(self, document_store, operator, value, expected_ids):
+        """Metadata parsed from JSON mixes ints and floats, which Solr stores in different fields."""
+        ratings = [3, 4, 4.5, 5.0]
+        document_store.write_documents(
+            [Document(id=str(rating), content="x", meta={"rating": rating}) for rating in ratings],
+            DuplicatePolicy.OVERWRITE,
+        )
+        documents = document_store.filter_documents({"field": "meta.rating", "operator": operator, "value": value})
+        assert sorted(document.id for document in documents) == expected_ids
+
+    @pytest.mark.parametrize(
+        ("operator", "value", "expected_ids"),
+        [("==", 2.5e20, ["big"]), ("<", 1e20, ["small"]), (">=", 1e20, ["big"]), ("in", [2.5e20], ["big"])],
+    )
+    def test_numeric_filters_outside_the_long_range(self, document_store, operator, value, expected_ids):
+        """A float bound past the long range must not reach the integer field, where Solr rejects it."""
+        document_store.write_documents(
+            [Document(id="small", content="x", meta={"v": 3}), Document(id="big", content="x", meta={"v": 2.5e20})],
+            DuplicatePolicy.OVERWRITE,
+        )
+        documents = document_store.filter_documents({"field": "meta.v", "operator": operator, "value": value})
+        assert sorted(document.id for document in documents) == expected_ids
 
     def test_numeric_looking_strings_stay_strings(self, document_store):
         """Solr's `parse-long` processor would turn "100" into 100 if it were still active."""
