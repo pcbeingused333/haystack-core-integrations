@@ -1441,6 +1441,33 @@ class TestConvertFileContentToAnthropicFormat:
             _convert_file_content_to_anthropic_format(file_content)
 
 
+class TestContextWindowExceededFinishReason:
+    # the SDK builds API responses without validating them, so a stop reason newer than its
+    # Literal types (model_context_window_exceeded, returned by Sonnet 4.5 and newer) comes through as is
+    def test_chat_completion_maps_to_length(self):
+        chat_completion = Message.model_construct(
+            id="msg_01MZF",
+            content=[TextBlock(citations=None, text="The answer is cut", type="text")],
+            model="claude-sonnet-4-5",
+            role="assistant",
+            stop_reason="model_context_window_exceeded",
+            stop_sequence=None,
+            type="message",
+            usage=Usage(input_tokens=507, output_tokens=219),
+        )
+        chat_message = _convert_chat_completion_to_chat_message(chat_completion, ignore_tools_thinking_messages=True)
+        assert chat_message.meta["finish_reason"] == "length"
+
+    def test_streaming_chunk_maps_to_length(self):
+        chunk = RawMessageDeltaEvent.model_construct(
+            delta=Delta.model_construct(stop_reason="model_context_window_exceeded", stop_sequence=None),
+            type="message_delta",
+            usage=MessageDeltaUsage(output_tokens=219),
+        )
+        streaming_chunk = _convert_anthropic_chunk_to_streaming_chunk(chunk, ComponentInfo(type="test"), 0, False)
+        assert streaming_chunk.finish_reason == "length"
+
+
 class TestHasServerToolBlocks:
     def test_has_server_tool_blocks(self):
         """Result blocks are matched by suffix; a client-side `tool_result` must not match."""

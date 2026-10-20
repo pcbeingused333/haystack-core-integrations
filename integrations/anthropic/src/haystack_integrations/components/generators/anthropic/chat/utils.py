@@ -44,6 +44,7 @@ FINISH_REASON_MAPPING: dict[str, FinishReason] = {
     "end_turn": "stop",
     "stop_sequence": "stop",
     "max_tokens": "length",
+    "model_context_window_exceeded": "length",
     "refusal": "content_filter",
     "pause_turn": "stop",
     "tool_use": "tool_calls",
