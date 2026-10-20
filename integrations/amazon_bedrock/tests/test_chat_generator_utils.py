@@ -2258,6 +2258,25 @@ class TestAmazonBedrockChatGeneratorUtils:
         with pytest.raises(ValueError, match=r"Cache point can only contain 'type' and 'ttl' keys."):
             _validate_and_format_cache_point({"type": "default", "invalid": "config"})
 
+    def test_parse_completion_response_context_window_exceeded_is_length(self):
+        model = "global.anthropic.claude-sonnet-4-6"
+        response_body = {
+            "output": {"message": {"role": "assistant", "content": [{"text": "The answer is cut"}]}},
+            "stopReason": "model_context_window_exceeded",
+            "usage": {"inputTokens": 10, "outputTokens": 5, "totalTokens": 15},
+        }
+        replies = _parse_completion_response(response_body, model)
+        assert replies[0].meta["finish_reason"] == "length"
+
+    def test_convert_event_to_streaming_chunk_context_window_exceeded_is_length(self):
+        model = "global.anthropic.claude-sonnet-4-6"
+        component_info = ComponentInfo(
+            type="haystack_integrations.components.generators.amazon_bedrock.chat.chat_generator.AmazonBedrockChatGenerator"
+        )
+        event = {"messageStop": {"stopReason": "model_context_window_exceeded"}}
+        chunk = _convert_event_to_streaming_chunk(event, model, component_info)
+        assert chunk.finish_reason == "length"
+
     def test_convert_event_to_streaming_chunk_tool_use_input_int(self):
         model = "global.anthropic.claude-sonnet-4-6"
         component_info = ComponentInfo(
