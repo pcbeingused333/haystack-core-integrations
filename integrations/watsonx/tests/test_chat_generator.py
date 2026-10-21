@@ -398,6 +398,25 @@ class TestRun:
         assert result["replies"][0].text == "Streaming response"
         assert result["replies"][0].meta["finish_reason"] == "stop"
 
+    @pytest.mark.parametrize("usage_in_own_chunk", [True, False])
+    def test_run_with_streaming_keeps_usage(self, mock_watsonx, mock_select_callback, usage_in_own_chunk):
+        usage = {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}
+        last_choice = {"delta": {"content": " response"}, "index": 0, "finish_reason": "stop"}
+        chunks = [{"choices": [{"delta": {"content": "Streaming"}, "index": 0, "finish_reason": None}]}]
+        if usage_in_own_chunk:
+            chunks += [{"choices": [last_choice]}, {"choices": [], "usage": usage}]
+        else:
+            chunks += [{"choices": [last_choice], "usage": usage}]
+        mock_watsonx["model_instance"].chat_stream = MagicMock(return_value=chunks)
+
+        generator = WatsonxChatGenerator(
+            api_key=Secret.from_token("test-api-key"), project_id=Secret.from_token("test-project")
+        )
+        result = generator.run(messages=[ChatMessage.from_user("Test prompt")], streaming_callback=MagicMock())
+
+        assert result["replies"][0].text == "Streaming response"
+        assert result["replies"][0].meta["usage"] == usage
+
     def test_run_with_string_input(self, mock_watsonx):
         generator = WatsonxChatGenerator(
             api_key=Secret.from_token("test-api-key"),

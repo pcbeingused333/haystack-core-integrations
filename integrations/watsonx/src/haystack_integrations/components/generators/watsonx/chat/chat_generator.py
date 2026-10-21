@@ -422,7 +422,6 @@ class WatsonxChatGenerator:
         """
         Convert one Watsonx AI stream-chunk to Haystack StreamingChunk.
         """
-        choice = chunk["choices"][0]
         chunk_meta = {
             "model": self.model,
             "model_id": chunk.get("model_id"),
@@ -431,6 +430,14 @@ class WatsonxChatGenerator:
             "created_at": chunk.get("created_at"),
             "received_at": datetime.now(UTC).isoformat(),
         }
+        if chunk.get("usage"):
+            chunk_meta["usage"] = chunk["usage"]
+
+        # Final usage-only chunk: no choices, just aggregate token counts.
+        if not chunk.get("choices"):
+            return StreamingChunk(content="", meta=chunk_meta, component_info=component_info)
+
+        choice = chunk["choices"][0]
 
         if choice["delta"] and (choice_delta_tool_calls := choice["delta"].get("tool_calls")):
             # create a list of ToolCallDelta objects from the tool calls
@@ -486,7 +493,7 @@ class WatsonxChatGenerator:
         component_info = ComponentInfo.from_component(self)
 
         for chunk in stream:
-            if not isinstance(chunk, dict) or not chunk.get("choices"):
+            if not isinstance(chunk, dict) or not (chunk.get("choices") or chunk.get("usage")):
                 continue
 
             streaming_chunk = self._convert_chunk_to_streaming_chunk(chunk, component_info)
@@ -532,7 +539,7 @@ class WatsonxChatGenerator:
         component_info = ComponentInfo.from_component(self)
 
         async for chunk in stream_generator:
-            if not isinstance(chunk, dict) or not chunk.get("choices"):
+            if not isinstance(chunk, dict) or not (chunk.get("choices") or chunk.get("usage")):
                 continue
 
             streaming_chunk = self._convert_chunk_to_streaming_chunk(chunk, component_info)
