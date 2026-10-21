@@ -594,6 +594,51 @@ class TestUtils:
         assert result["replies"][0].tool_calls[1].arguments == {"city": "London"}
         assert result["replies"][0].tool_calls[1].id is None
 
+    @staticmethod
+    def _no_arg_tool_call_chunks():
+        return [
+            ChatResponse(
+                model="qwen3:0.6b",
+                created_at="2025-07-31T14:48:03.471292Z",
+                done=False,
+                message=Message(
+                    role="assistant",
+                    content="",
+                    tool_calls=[Message.ToolCall(function=Message.ToolCall.Function(name="get_time", arguments={}))],
+                ),
+            ),
+            ChatResponse(
+                model="qwen3:0.6b",
+                created_at="2025-07-31T14:48:03.678729Z",
+                done=True,
+                done_reason="stop",
+                prompt_eval_count=217,
+                eval_count=46,
+                message=Message(role="assistant", content=""),
+            ),
+        ]
+
+    def test_handle_streaming_response_tool_call_without_arguments(self):
+        generator = OllamaChatGenerator()
+        result = generator._handle_streaming_response(self._no_arg_tool_call_chunks(), None)
+
+        assert len(result["replies"][0].tool_calls) == 1
+        assert result["replies"][0].tool_calls[0].tool_name == "get_time"
+        assert result["replies"][0].tool_calls[0].arguments == {}
+
+    @pytest.mark.asyncio
+    async def test_handle_streaming_response_async_tool_call_without_arguments(self):
+        async def async_chunks():
+            for chunk in self._no_arg_tool_call_chunks():
+                yield chunk
+
+        generator = OllamaChatGenerator()
+        result = await generator._handle_streaming_response_async(async_chunks(), None)
+
+        assert len(result["replies"][0].tool_calls) == 1
+        assert result["replies"][0].tool_calls[0].tool_name == "get_time"
+        assert result["replies"][0].tool_calls[0].arguments == {}
+
     def test_handle_streaming_response_tool_calls_with_thinking(self):
         ollama_chunks = [
             ChatResponse(

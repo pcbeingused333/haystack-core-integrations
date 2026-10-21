@@ -470,7 +470,12 @@ class OllamaChatGenerator:
         for key in index_order:
             arguments: str = arg_by_index.get(key, "")
             tool_calls.append(
-                ToolCall(id=id_by_index[key], tool_name=name_by_index[key], arguments=json.loads(arguments))
+                ToolCall(
+                    id=id_by_index[key],
+                    tool_name=name_by_index[key],
+                    # a tool without parameters is streamed with empty arguments
+                    arguments=json.loads(arguments) if arguments else {},
+                )
             )
 
         # We can't use _convert_streaming_chunks_to_chat_message because
@@ -557,7 +562,12 @@ class OllamaChatGenerator:
         for key in index_order:
             arguments: str = arg_by_index.get(key, "")
             tool_calls.append(
-                ToolCall(id=id_by_index[key], tool_name=name_by_index[key], arguments=json.loads(arguments))
+                ToolCall(
+                    id=id_by_index[key],
+                    tool_name=name_by_index[key],
+                    # a tool without parameters is streamed with empty arguments
+                    arguments=json.loads(arguments) if arguments else {},
+                )
             )
 
         # We can't use _convert_streaming_chunks_to_chat_message because
