@@ -23,6 +23,7 @@ from haystack.dataclasses import ChatMessage, ChatRole, ToolCall
 from haystack.dataclasses.chat_message import ReasoningContent
 from haystack.dataclasses.streaming_chunk import (
     ComponentInfo,
+    FinishReason,
     StreamingCallbackT,
     StreamingChunk,
     SyncStreamingCallbackT,
@@ -43,6 +44,15 @@ from openai.types.chat.chat_completion import Choice
 from haystack_integrations.common.vllm.utils import _create_async_openai_client, _create_openai_client
 
 logger = logging.getLogger(__name__)
+
+# Same mapping Haystack's OpenAI chunk converter applies to the chunks it builds
+_FINISH_REASON_MAPPING: dict[str, FinishReason] = {
+    "stop": "stop",
+    "length": "length",
+    "content_filter": "content_filter",
+    "tool_calls": "tool_calls",
+    "function_call": "tool_calls",
+}
 
 
 def _convert_chat_history_to_vllm_format(messages: list[ChatMessage]) -> list[dict[str, Any]]:
@@ -394,6 +404,7 @@ class VLLMChatGenerator:
                     reasoning=ReasoningContent(reasoning_text=reasoning_text),
                     index=0,
                     start=not reasoning_started,
+                    finish_reason=_FINISH_REASON_MAPPING.get(chunk.choices[0].finish_reason or ""),
                     component_info=component_info,
                     meta={
                         "model": chunk.model,
@@ -439,6 +450,7 @@ class VLLMChatGenerator:
                         reasoning=ReasoningContent(reasoning_text=reasoning_text),
                         index=0,
                         start=not reasoning_started,
+                        finish_reason=_FINISH_REASON_MAPPING.get(chunk.choices[0].finish_reason or ""),
                         component_info=component_info,
                         meta={
                             "model": chunk.model,

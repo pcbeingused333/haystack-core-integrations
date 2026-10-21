@@ -53,14 +53,14 @@ class AsyncMockStream(AsyncStream[ChatCompletionChunk]):
         raise StopAsyncIteration
 
 
-def _make_reasoning_chunk(text):
+def _make_reasoning_chunk(text, finish_reason=None):
     chunk = ChatCompletionChunk(
         id="test-id",
         model=MODEL,
         object="chat.completion.chunk",
         choices=[
             chat_completion_chunk.Choice(
-                finish_reason=None,
+                finish_reason=finish_reason,
                 logprobs=None,
                 index=0,
                 delta=chat_completion_chunk.ChoiceDelta(content=None, role=None),
@@ -550,6 +550,20 @@ class TestRun:
         assert streaming_chunks[5].start is False
         assert streaming_chunks[6].start is False
 
+    def test_run_streaming_truncated_in_reasoning_keeps_finish_reason(self):
+        """A stream cut by max_tokens while still reasoning must report finish_reason="length"."""
+        openai_chunks = [_make_reasoning_chunk("Okay"), _make_reasoning_chunk(", the", finish_reason="length")]
+
+        component = VLLMChatGenerator(model=MODEL, streaming_callback=lambda _: None)
+        component.warm_up()
+
+        with patch("openai.resources.chat.completions.Completions.create") as mock:
+            mock.return_value = MockStream(openai_chunks, cast_to=None, response=None, client=None)
+            result = component.run([ChatMessage.from_user("Hello")])
+
+        assert result["replies"][0].reasoning.reasoning_text == "Okay, the"
+        assert result["replies"][0].meta["finish_reason"] == "length"
+
 
 @pytest.mark.asyncio
 class TestRunAsync:
@@ -627,6 +641,21 @@ class TestRunAsync:
         assert len(chunks_received) > 0
         assert len(response["replies"]) == 1
         assert response["replies"][0].text == "Hello"
+
+    async def test_run_async_streaming_truncated_in_reasoning_keeps_finish_reason(self):
+        openai_chunks = [_make_reasoning_chunk("Okay"), _make_reasoning_chunk(", the", finish_reason="length")]
+
+        async def callback(_chunk):
+            pass
+
+        component = VLLMChatGenerator(model=MODEL, streaming_callback=callback)
+
+        with patch("openai.resources.chat.completions.AsyncCompletions.create", new_callable=AsyncMock) as mock:
+            mock.return_value = AsyncMockStream(openai_chunks)
+            response = await component.run_async([ChatMessage.from_user("Hello")])
+
+        assert response["replies"][0].reasoning.reasoning_text == "Okay, the"
+        assert response["replies"][0].meta["finish_reason"] == "length"
 
     async def test_run_async_streaming_with_reasoning(self):
         """Test that async streaming with reasoning sets start=True on first reasoning and content chunks."""
